@@ -30,7 +30,7 @@ SPINNER_TEXT = "回答生成中..."
 # ==========================================
 # ログ出力系
 # ==========================================
-LOG_DIR_PATH = "./logs"
+LOG_DIR_PATH = ".\logs"
 LOGGER_NAME = "ApplicationLog"
 LOG_FILE = "application.log"
 APP_BOOT_MESSAGE = "アプリが起動されました。"
@@ -46,16 +46,20 @@ TEMPERATURE = 0.5
 # ==========================================
 # RAG参照用のデータソース系
 # ==========================================
-RAG_TOP_FOLDER_PATH = "./data"
+RAG_TOP_FOLDER_PATH = ".\data"
 SUPPORTED_EXTENSIONS = {
     ".pdf": PyMuPDFLoader,
     ".docx": Docx2txtLoader,
-    ".csv": lambda path: CSVLoader(path, encoding="utf-8")
+    ".csv": lambda path: CSVLoader(path, encoding="utf-8"),
+    ".txt": TextLoader
 }
 WEB_URL_LOAD_TARGETS = [
     "https://generative-ai.web-camp.io/"
 ]
 
+CHUNK_SIZE = 500
+CHUNK_OVERLAP = 50
+NUM_RETRIEVAL_DOCS = 5
 
 # ==========================================
 # プロンプトテンプレート
