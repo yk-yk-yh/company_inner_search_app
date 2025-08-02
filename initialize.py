@@ -19,6 +19,8 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
 from langchain_community.vectorstores import Chroma
 import constants as ct
+import csv
+from langchain.schema import Document
 
 
 ############################################################
@@ -214,10 +216,14 @@ def file_load(path, docs_all):
 
     # 想定していたファイル形式の場合のみ読み込む
     if file_extension in ct.SUPPORTED_EXTENSIONS:
-        # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
-        loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
-        docs = loader.load()
-        docs_all.extend(docs)
+        # CSVファイルで社員名簿の場合、特別処理
+        if file_extension == ".csv" and "社員名簿" in file_name:
+            process_employee_csv(path, docs_all)
+        else:
+            # ファイルの拡張子に合ったdata loaderを使ってデータ読み込み
+            loader = ct.SUPPORTED_EXTENSIONS[file_extension](path)
+            docs = loader.load()
+            docs_all.extend(docs)
 
 
 def adjust_string(s):
@@ -242,3 +248,168 @@ def adjust_string(s):
     
     # OSがWindows以外の場合はそのまま返す
     return s
+
+
+def process_employee_csv(path, docs_all):
+    """
+    社員名簿CSVファイルを部署別統合ドキュメントとして処理
+    
+    Args:
+        path: CSVファイルのパス
+        docs_all: データソースを格納する用のリスト
+    """
+    try:
+        # エンコーディングを自動検出して読み込み
+        encodings_to_try = ['utf-8', 'shift_jis', 'cp932', 'utf-8-sig']
+        content = None
+        used_encoding = None
+        
+        for encoding in encodings_to_try:
+            try:
+                with open(path, 'r', encoding=encoding) as file:
+                    content = file.read()
+                    used_encoding = encoding
+                    break
+            except (UnicodeDecodeError, UnicodeError):
+                continue
+        
+        if content is None:
+            raise Exception("Could not decode CSV file")
+        
+        # CSVを解析
+        from io import StringIO
+        csv_reader = csv.DictReader(StringIO(content))
+        
+        # 部署別に社員情報を整理
+        departments = {}
+        all_employees = []
+        
+        for row in csv_reader:
+            # 空の行をスキップ
+            if not row.get('社員ID', '').strip():
+                continue
+            
+            # 各社員の情報を整理
+            employee_info = f"""
+社員ID: {row.get('社員ID', '')}
+氏名: {row.get('氏名（フルネーム）', '')}
+性別: {row.get('性別', '')}
+年齢: {row.get('年齢', '')}
+部署: {row.get('部署', '')}
+役職: {row.get('役職', '')}
+雇用形態: {row.get('従業員区分', '')}
+入社日: {row.get('入社日', '')}
+メールアドレス: {row.get('メールアドレス', '')}
+スキル: {row.get('スキルセット', '')}
+資格: {row.get('保有資格', '')}
+学歴: {row.get('大学名', '')} {row.get('学部・学科', '')}
+卒業年月日: {row.get('卒業年月日', '')}
+            """.strip()
+            
+            all_employees.append(employee_info)
+            
+            # 部署別に分類
+            dept = row.get('部署', '不明')
+            if dept not in departments:
+                departments[dept] = []
+            departments[dept].append(employee_info)
+        
+        # 各部署ごとに強化ドキュメントを作成
+        for dept_name, employees in departments.items():
+            if dept_name == '不明':
+                continue
+                
+            # 部署の従業員名リストを作成
+            dept_names = []
+            for emp in employees:
+                if '氏名: ' in emp:
+                    name = emp.split('氏名: ')[1].split('\n')[0]
+                    dept_names.append(name)
+            
+            # 部署別キーワード設定
+            dept_keywords = {
+                '人事部': '人事部',
+                '営業部': '営業部',
+                '総務部': '総務部',
+                '経理部': '経理部',
+                'IT部': 'IT部',
+                'マーケティング部': 'マーケティング部'
+            }
+            
+            keywords = dept_keywords.get(dept_name, f'{dept_name} {dept_name}部門 {dept_name}課 {dept_name}担当')
+            
+            # メイン部署ドキュメント（優先度高）
+            dept_content = f"""【{dept_name}に所属している従業員情報の一覧化】
+
+これは{dept_name}のみの従業員情報です。{dept_name}以外の部署の情報は含まれません。
+
+{dept_name}の従業員一覧（全{len(employees)}名）:
+{', '.join(dept_names)}
+"""
+            
+            dept_doc = Document(
+                page_content=dept_content,
+                metadata={
+                    "source": path, 
+                    "type": f"{dept_name}従業員一覧", 
+                    "department": dept_name,
+                    "priority": "high"
+                }
+            )
+            docs_all.append(dept_doc)
+            
+            # 検索用サマリードキュメント（シンプルな氏名リストのみ）
+            dept_summary = f"""{dept_name}従業員一覧の検索結果
+
+質問：{dept_name}に所属している従業員情報を一覧化して
+回答：{dept_name}の従業員は以下の{len(employees)}名です。
+
+{', '.join(dept_names)}
+
+総数: {len(employees)}名
+
+重要: {keywords}
+注意: 他の部署は含まれません。"""
+            
+            dept_summary_doc = Document(
+                page_content=dept_summary,
+                metadata={
+                    "source": path, 
+                    "type": f"{dept_name}サマリー", 
+                    "department": dept_name,
+                    "priority": "highest"
+                }
+            )
+            docs_all.append(dept_summary_doc)
+            
+            # 個別従業員ドキュメント
+            for i, emp_info in enumerate(employees):
+                emp_doc = Document(
+                    page_content=f"{dept_name}所属従業員詳細情報:\n\n{emp_info}\n\n注意：この従業員は{dept_name}に所属しています。",
+                    metadata={
+                        "source": path,
+                        "type": f"{dept_name}個別従業員",
+                        "department": dept_name,
+                        "employee_index": i
+                    }
+                )
+                docs_all.append(emp_doc)
+        
+        # 全社員名簿は削除（他部署の情報混入を防ぐため）
+        # all_content = "【全社員名簿】\n\n" + "\n\n---\n\n".join(all_employees)
+        # all_doc = Document(
+        #     page_content=all_content,
+        #     metadata={"source": path, "type": "全社員名簿"}
+        # )
+        # docs_all.append(all_doc)
+        
+        print(f"CSVファイル処理完了: 全{len(departments)}部署, 全従業員 {len(all_employees)}名")
+        for dept, emps in departments.items():
+            print(f"  {dept}: {len(emps)}名")
+        
+    except Exception as e:
+        print(f"CSVファイル読み込みエラー: {e}")
+        # エラー時は通常のCSVLoaderを使用
+        loader = ct.SUPPORTED_EXTENSIONS[".csv"](path)
+        docs = loader.load()
+        docs_all.extend(docs)
